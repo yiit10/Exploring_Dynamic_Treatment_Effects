@@ -1,0 +1,1270 @@
+---
+title: "Dynamic Treatment Effects Exploration - Sun and Abraham (2021)"
+author: "Furkan Yiğit Kavak - LMU Munich"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+    theme: cerulean
+    highlight: tango
+---
+
+```{=html}
+<style>
+body {
+  font-family: Arial, sans-serif;
+  line-height: 1.6;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: #2C3E50;
+}
+
+code {
+  background-color: #F9F9F9;
+  color: #C7254E;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 90%;
+}
+
+pre {
+  background-color: #F3F3F3;
+  padding: 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre-wrap; /* Ensures that the code wraps within the container */
+  word-wrap: break-word; /* Ensures that long words break and wrap to the next line */
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1em;
+}
+
+table, th, td {
+  border: 1px solid #D9D9D9;
+}
+
+th, td {
+  padding: 8px;
+  text-align: left;
+}
+
+th {
+  background-color: #F2F2F2;
+}
+
+caption {
+  font-size: 1.2em;
+  margin-bottom: 0.5em;
+}
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(data.table)
+library(forecast)
+library(dreamerr)
+library(fixest)
+library(haven)
+library(knitr)
+library(kableExtra)
+library(did)
+library(ggplot2)
+
+```
+
+```{r part2 setup}
+setwd("~/seminar")
+db <- readRDS("min_wage_CS.rds")
+```
+
+```{r character count}
+# Load the file content
+file_content <- readLines(knitr::current_input())
+
+# Remove code chunks by detecting and removing lines between ```{r} and ```
+is_code <- grepl("^```", file_content)
+in_code_block <- cumsum(is_code) %% 2 == 1
+
+# Combine the non-code lines:
+no_code_content <- paste(file_content[!in_code_block], collapse = "\n")
+
+# Count characters without code chunks, so that the result will be the character count of the HTML itself:
+character_count_no_code <- nchar(no_code_content)
+paste("The character count for this HTML without the code chunks:")
+print(character_count_no_code)
+
+```
+
+# Part 1: Sun and Abraham estimator and replication
+
+## Introduction and Data
+
+In this paper, we will focus on the replication of the paper published by Sun and Abraham (2021), which focuses on estimating dynamic treatment effects in event studies with heterogeneous treatment effects.
+
+Compared to the model, I would like to challenge it and see what happens if we use different DGPs that are more complex and more realistic compared to Sun and Abraham, and how their proposed model works under the new DGPs.
+
+To talk about the general flow of the paper, in below we will define the variables that we'll use from the most complex model that we will test Sun and Abraham model. After that, starting from the most basic model and which was assumed by the authors (unit fixed effects and time fixed effects are included as well as the treatment effect with its leads and lags), we will add one variable in each time to create the variations in the DGP. After we have introduced all of the additional variables for one time by themselves alone in the model, we will include them all in the last variation and test how Sun and Abraham model works under that DGP specification. 
+
+Here are the complex model with all of the variables are included with their explanations:
+
+$$
+Y_{it}^6 = \alpha_i + \gamma_t + \eta_{it} + \text{pre_treatment_effect}_{it} + (\delta_{it}^{\text{correlated}} + \epsilon_{it}) I(t \geq T_i) + \theta_i I(t \geq T_i) + \gamma_{T_i}^{\text{treatment}} I(t \geq T_i) + u_{it}
+$$
+
+1.  **Outcome Variable** $Y_{it}$:
+
+-   This is the observed outcome for individual $i$ at time $t$, such as labor income.
+
+2.  **Unit Fixed Effect (**$\alpha_i$):
+
+-   The unit fixed effect captures the individual-specific characteristics that remain constant over time, representing the baseline level of the outcome variable for each individual.
+-   It is defined as: 
+$$
+    \alpha_i \sim \mathcal{N}(100, 10^2)
+$$
+
+3.  **Time-Fixed Effect (**$\gamma_t$):
+
+-   The time-fixed effect captures the common shocks or trends affecting all individuals at time $t$, such as macroeconomic conditions.
+
+-   We propose an ARMA(4,2) model for the time-fixed effects. The autoregressive (AR) part will generate a near-unit root process. We assume that external shocks have long-lasting effects on income, but those effects decrease over time. Economic and financial data often show complex patterns that cannot be captured by simpler models. An ARMA(4,2) process is flexible enough to capture various patterns, such as cyclical behaviors and seasonal effects, making it a suitable choice for simulating realistic time-fixed effects.
+
+-   One of the discussions can be why we are not using a simpler model in here. We wanted to make this part more realistic by using ARMA(4,2). Let's imagine that we have used AR(1) model in here, and that means a shock happened in year == 2010 will affect the outcome in year == 2012 through its effect on 2011 only, and that effect will die out as the years pass by. However, in reality, if the economy receives a negative shock in 2010, it will not affect the situation in 2012 through the situaiton in 2011 only. The effect of that shock will differ in terms of how it impacts the future outcomes. So with ARMA(4,2) model, we are allowing for more complex model in the time fixed effects.  
+
+-   Also, we want this time-fixed effects to be "random walk with drift and trend", so that as the time passes, the outcome variable will have a deterministic increase. If we assume that the outcome variable is income, it is safe to assume that as the time passes by, since the individuals will gain more experience, the expected income will be higher.
+
+-   So the DGP of the Time-Fixed Effect is:
+
+$$
+X_t = 10 + 0.1 \cdot t + \phi_1 X_{t-1} + \phi_2 X_{t-2} + \phi_3 X_{t-3} + \phi_4 X_{t-4} + \epsilon_t + \theta_1 \epsilon_{t-1} + \theta_2 \epsilon_{t-2}
+$$
+
+where:
+
+-   $\phi_1 = 0.4$
+
+-   $\phi_2 = 0.29$
+
+-   $\phi_3 = 0.11$
+
+-   $\phi_4 = 0.18$
+
+-   $\theta_1 = 0.3$
+
+-   $\theta_2 = -0.2$
+
+-   $\epsilon_t \sim \mathcal{N}(0, 1^2)$ is the white noise error term.
+
+As a result of this, the time-fixed effects look like:
+
+```{r plot1, echo = FALSE}
+
+# Set a random seed for reproducibility
+set.seed(12)
+# Define ARMA model parameters
+arma_params <- list(order = c(4, 0, 2), ar = c(0.4, 0.29, 0.11, 0.18), ma = c(0.3, -0.2), sd = 1)
+
+# Generate deterministic trend and drift
+n_years <- 30
+drift <- 10
+trend <- 0.1 * (1:n_years)
+
+# Generate ARMA(4,2) process
+arma_process <- arima.sim(n = n_years, model = arma_params)
+
+# Combine the deterministic part with the ARMA process
+time_fixed_effects <- drift + trend + arma_process
+plot(time_fixed_effects)
+```
+
+So the outcome variable is expected to increase during the treatment time for all of the individuals, and it is affected by the seasonality or business cycles that are effective for at least 4 years.
+
+4.  **Dynamic Trend Per Individual (**$\eta_{it}$):
+
+-   With this variable, we are adding a dynamic trend per individual characteristics, i.e, unit fixed effects. We are using ARMA(4,2) specification instead of the other specifications due to capture the seasonality or business cycles. The coefficients are selected in a way that the stationarity of the DGP of this variable will be near-unit root process, which means the shocks happened in the past will die out for sure, but slower. 
+
+-   If we assume that the unit fixed effects are the constant characteristics of the individuals, this part can be considered as the external and dynamic part of the characteristics. 
+
+-   It is modeled as:
+
+$$
+\eta_{it} \sim \text{ARMA}(4, 2)
+$$
+
+$$
+X_t = \phi_1 X_{t-1} + \phi_2 X_{t-2} + \phi_3 X_{t-3} + \phi_4 X_{t-4} + \epsilon_t + \theta_1 \epsilon_{t-1} + \theta_2 \epsilon_{t-2}
+$$
+
+where the coefficients are the same with the previous ARMA specification.
+
+In the initial setup, we will not include this variable.
+
+5.  **Expected Treatment Effect (**$\delta_{it}$):
+
+-   The expected treatment effect is the systematic effect of the treatment on the outcome, which starts at the treatment time $T_i$. - The initial expected treatment effect is:
+
+$$
+        \delta_{it} = \begin{cases} 
+        -50 & \text{if } t = T_i \\
+        0 & \text{if } t < T_i
+        \end{cases}
+$$
+
+- For subsequent periods, it follows an AR(1) process:
+
+$$
+        \delta_{i,t+1} = 0.75 \delta_{it}
+$$ 
+
+As we see from the equation above, there is no effect of treatment before the treatment starts for the cohorts. So, if the model suggested by Sun and Abraham works properly, we should reject the hypothesis of leads of the treatment = 0.
+
+This specification will be analyzed in the initial setup, which is in line with the assumptions of Sun and Abraham. However, we would like to test the Sun and Abraham method under a specification where the expected treatment effect is correlated with the unit fixed effect. To test it, we will build up the expected treatment effect as the following :
+
+$$
+\delta_{it} = \begin{cases} 
+        -1 \cdot \text{mean}(u_i) \cdot 0.5 & \text{if } t = T_i \\
+        0 & \text{if } t < T_i
+        \end{cases}
+$$
+
+-   For subsequent periods, it follows an AR(1) process:
+$$
+          \delta_{i,t+1} = 0.75 \delta_{it}
+$$
+
+where $u_i$ represents the unit fixed effects. Since the expected value of the unit_fixed effects is 100, by multiplying it with -0.5, we are expecting to see the initial treatment effect as -50, in line with the previous definition of the expected treatment effect.  By correlating the initial expected treatment effect with the unit fixed effects, we can evaluate how the Sun and Abraham method performs when the independence assumption between the unit fixed effects and treatment effect does not hold.
+
+We would like to focus on the treatment variable more, and challenge the Sun and Abraham method as adding significant pre-treatment effects in the model where the they will be significant for the treated units only.
+
+6.  **Significant Pre-Treatment Effects** ($\text{pre_treatment_effect}$):
+
+-   To further challenge the Sun and Abraham model, we will introduce significant pre-treatment effects for the treated units. Specifically, we add a significant effect of -20 to the outcome variable 3 periods before the treatment starts for the treated units. This allows us to test if the model can correctly identify and account for these pre-treatment effects.
+
+-   It is defined as:
+
+$$
+\text{pre_treatment_effect}_{it} = \begin{cases}
+-20 & \text{if } t < T_i - 4 \text{ and treated} = 1 \\
+0 & \text{otherwise}
+\end{cases}
+$$
+
+7.  **Noise Component of Treatment (**$\epsilon_{it}$):
+
+-   This is the stochastic element added to the treatment effect to simulate real-world unpredictability.
+-   It is defined as:
+
+$$
+\epsilon_{it} \sim \mathcal{N}(0, 1)
+$$
+With this variable, we are allowing the treatment effect to vary with a small variance. Even though we are not expecting this variable to change the results dramatically, this specification of the treatment effect makes the analysis more realistic. 
+
+8. **Indicator Function (**$I(t \geq T_i)$):
+
+-   This is an indicator function that equals 1 if time $t$ is greater than or equal to the treatment time $T_i$, and 0 otherwise.
+
+-   It ensures that the treatment effects are applied only after the treatment starts.
+
+9.  **Unit-Specific Treatment Effect (**$\theta_i$):
+
+-   This captures the individual-level heterogeneity in response to the treatment.
+
+-   It is defined as:
+
+$$
+\theta_i \sim \mathcal{N}(0, 10^2)
+$$ 
+
+By introducing this variable into the DGP, we are allowing the treatment effect to vary across units. In the paper, it was assumed that the treatment effect varies over the treatment time, but the units are homogeneous in all of the cohorts where the cohorts are defined according to the treatment time. We are trying to challenge the model by relaxing this assumption in the DGP and try to see how the model responds to the variation in the treatment effect per individual. 
+
+10. **Time-Fixed Effect for Treatment (**$\gamma_{T_i}^{\text{treatment}}$):
+
+-   This represents the influence of general economic conditions at the treatment time $T_i$ on the treatment effect. In Sun and Abraham's paper, one of the assumptions is that the treatment is not changing over the time of the treatment, but they are also relaxing this assumption for some of the analysis they made. One of the crucial part of their paper happens when they relaxed this assumption. In other words, they are allowing the treatment effect to change according to the time of the treatment received. So we can test their model by both including and excluding this variable.
+
+-   We modeled this variable as partially correlated with the general time-fixed effects:
+$$
+\gamma_{T_i}^{\text{treatment}} = 0.2 \gamma_{T_i} + 0.8 \mathcal{N}(0, 20^2)
+$$
+
+To explain again, we are adding a new variable into the treatment effect so that the treatment effect will change according to the time that the treatment received by the individuals. The effect of this variable will be kept the same for the individuals that received the treatment at the same time, but will be different from the other individuals that do not received the treatment at that time. 
+
+To make this variable realistic, we have made it to be correlated with the time fixed effects. In other words, if we introduce the time fixed effects as the general situation in the economy, the treatment effect will be affected by the general situation of the economy, which is realistic. 
+
+11. **White-Noise variable** ($u_{it}$):
+
+-   This is the white noise added to the outcome variable to simulate real-world unpredictability and measurement errors.
+-   It is defined as:
+$$
+u_{it} \sim \mathcal{N}(0, 1)
+$$
+So, let's explain the DGPs that we will use to test Sun and Abraham model. All of the models (variations) below will be run with sunab() function under fixest package, and what we will do at the end is comparing the results among the variations and the expected values of the treatment effect with its 5 leads and 5 lags. 
+
+
+### Initial model:
+
+$$
+Y_{it}^0 = \alpha_i + \gamma_t + (\delta_{it} + \epsilon_{it}) I(t \geq T_i) + u_{it}
+$$ 
+
+In this initial model, we will generate the data to be consist of unit_fixed effects, time_fixed effects, the treatment effect with the lags and the leads, and the white-noise variable.
+
+### Model Variation 1:
+
+In the first variation, we will add the dynamic trend per individual to the model.
+
+$$
+Y_{it}^1 = \alpha_i + \gamma_t + \eta_{it} + (\delta_{it} + \epsilon_{it}) I(t \geq T_i) + u_{it}
+$$
+
+In this variation, we will generate the data to consist of unit_fixed effects, time_fixed effects, the dynamic trend per individual(keep in mind that this is the time variant part of the unit_fixed effects, so that we will allow the unit_fixed effects to vary), the treatment effect with the lags and the leads, and the white-noise variable. 
+
+Compared to the initial model, we are allowing the unit fixed effects to have a dynamic trend part.
+
+### Model Variation 2:
+
+In the second variation, we will exclude the dynamic trend per individual and add the correlated version of the expected treatment effect.
+
+$$
+Y_{it}^2 = \alpha_i + \gamma_t + (\delta_{it}^{\text{correlated}} + \epsilon_{it}) I(t \geq T_i) + u_{it}
+$$
+
+In this variation, we introduce a correlated version of the expected treatment effect. This correlated treatment effect is modeled to be dependent on the unit fixed effects, challenging the assumption that the treatment effect is independent of the individual characteristics.
+
+In other words, we are assuming that when the unit fixed effects are higher, the effect of the treatment will be higher in absolute terms. In the normal version of the expected treatment effects, we are assuming that the effect of the treatment at the treatment time will be equal to -50 for all of the individuals regardless of their unit fixed effects. Now, we are introducing the expected treatment effect to be equal to the -0.5 of the unit fixed effects of the individuals. Since the expected value for the unit fixed effects is 100, the expected value of the new treatment effects is -50 again at year == 0, and since it will follow an AR(1) process with coefficient of 0.75, the expected treatment effects are the same with the initial model, but the individuals are receiving the treatment effects according to their unit fixed effects.
+
+### Model Variation 3:
+
+In the third variation, we will exclude the correlated version of the expected treatment effect and add significant pre-treatment effects.
+
+$$
+Y_{it}^3 = \alpha_i + \gamma_t + \text{pre_treatment_effect}_{it} + (\delta_{it} + \epsilon_{it}) I(t \geq T_i) + u_{it}
+$$
+
+In this variation, we introduce significant pre-treatment effects. These effects are added to the outcome variable for the treated units 3 periods before the treatment starts. This setup tests the model's ability to correctly identify and account for pre-treatment effects.
+
+When we introduced this variable into the DGP, the treated individuals will have a pre-treatment effect as -20 in year == -3, year == -2 and year == -1. So we are relaxing the "no anticipatory behavior" in some sense, and test how the Sun and Abraham model works when we relax this assumption. 
+
+### Model Variation 4:
+
+In the fourth variation, we will include the unit-specific treatment effect.
+
+$$
+Y_{it}^4 = \alpha_i + \gamma_t + (\delta_{it} + \epsilon_{it}) I(t \geq T_i) + \theta_i I(t \geq T_i) + u_{it}
+$$
+
+This variation includes a unit-specific treatment effect, $\theta_i$, which captures the individual-level heterogeneity in response to the treatment. This setup tests how well the model can account for heterogeneity in treatment effects across individuals.
+
+In this variation, we are checking whether the Sun and Abraham model works when we are relaxing the assumption of "homogeneity of the individuals in the same cohort". In this variation, every individual will response to the treatment differently while we keep the expected value of the treatment as the same. 
+
+Since in model variation 2, we introduced a treatment effect which is correlated with the unit fixed effects, now, we are introducing this variable to be random, and try to see what happens. 
+
+### Model Variation 5:
+
+In the fifth variation, we will include the time-fixed effect for treatment.
+
+$$
+Y_{it}^5 = \alpha_i + \gamma_t + (\delta_{it} + \epsilon_{it}) I(t \geq T_i) + \gamma_{T_i}^{\text{treatment}} I(t \geq T_i) + u_{it}
+$$
+
+This variation includes a time-fixed effect for treatment,$\gamma_{T_i}^{\text{treatment}}$, where the individuals receive the treatment at the same time will experience a different treatment effect according to the time that they received the treatment. The change in the treatment effect is correlated with the time fixed effects, which is realistic to build as we discussed earlier.
+
+This model variation is one of the key variations that we want to test, because the authors were discussing that they are suggesting a new model to deal with this heterogeneity specifically. 
+
+
+
+### Model Variation 6:
+
+In the sixth variation, we will include the dynamic trend per individual, the correlated version of the expected treatment effect, the significant pre-treatment effects, the unit-specific treatment effect, and the time-fixed effect for treatment.
+
+$$
+Y_{it}^6 = \alpha_i + \gamma_t + \eta_{it} + \text{pre_treatment_effect}_{it} + (\delta_{it}^{\text{correlated}} + \epsilon_{it}) I(t \geq T_i) + \theta_i I(t \geq T_i) + \gamma_{T_i}^{\text{treatment}} I(t \geq T_i) + u_{it}
+$$
+
+This comprehensive variation includes all the previously mentioned components: the dynamic trend per individual, the correlated version of the expected treatment effect, significant pre-treatment effects, the unit-specific treatment effect, and the time-fixed effect for treatment. This setup tests the robustness of the Sun and Abraham method under a complex and realistic DGP.
+
+In other words, what we are introducing into the model are:
+
+-   Individual characteristics both constant part and the dynamic trend part.
+-   Time fixed effects
+-   the treatment effect in different ways: the expected treatment effect which is correlated with the unit fixed effects, the random individual responses to the treatment, constant pre-treatment for the treated individuals and the changes in the treatment effect according to the time that the treatment was received, which is also correlated with the time fixed effects.
+
+By including these variations, we systematically test the Sun and Abraham model under increasingly complex and realistic scenarios, providing a thorough evaluation of its performance and robustness.
+
+## Data Creation and Explanation:
+
+```{r data, echo = TRUE}
+
+# We will work on an artificial data on this RMarkdown file. The main reason is that even though I found the HRS data that
+# Sun and Abraham worked on, I wanted to know the DGPs of the variables so that we can understand the strengths
+# and weaknesses of the proposed methodology. 
+
+# According to the usage of the following artificial data, we will not be able to compare our results with the results
+# from Sun and Abraham, but we can form the dataset as we wanted, so this will allow us to see if the assumptions 
+# made by Sun and Abraham is logical or not, and what happens to the results when the assumptions did not hold.
+
+# Set the random seed for reproducibility
+set.seed(12)
+
+# Let's define the parameters. We would like to work on 1000 individuals for 30 years, where the treatment can happen
+# between 9th and 19th years. We can increase the numbers for sure, but I wanted to kept 30 years as minimum,
+# because I would like to argue the effect of non-stationarity in the outcome variable. In the original paper,
+# the authors looked for the effect of hospitalization on labor income and out of pocket medical spending,
+# and those variables are expected to be non-stationary.   
+n_individuals <- 10000
+n_years <- 30
+treatment_start <- 9
+treatment_end <- 19
+
+# Create a data.table with individual IDs and year
+data <- CJ(id = 1:n_individuals, year = 1:n_years)
+
+# Assign treatment status. We allowed for 10% of the individuals to be never-treated. 
+data[, treated := ifelse(id <= 0.9 * n_individuals, 1, 0)]
+
+# Create a table for individual-level information
+individuals <- unique(data[, .(id, treated)])
+
+# Assign treatment year for treated individuals (randomly between 9 and 19)
+individuals[treated == 1, treatment_time := sample(treatment_start:treatment_end, .N, replace = TRUE)]
+individuals[treated == 0, treatment_time := NA]
+
+# Generate unit-specific effects for overall income with mean 100 and sd 10. Next, we generate unit-specific effects
+# to capture individual-level characteristics that remain constant over time. 
+# This is akin to the unit fixed effects (alpha_i) in the original paper by Sun and Abraham. 
+# These fixed effects control for unobserved heterogeneity among individuals, ensuring our analysis is not
+# biased by these persistent individual differences.
+
+## We are assuming that those unit fixed effects are constant over time and have a normal distribution among units. 
+## It is important to note that eventually this unit fixed effects should be independent from the treatment. 
+# We will talk about what happens when we ignore this assumption. 
+individuals[, unit_fixed_effect := rnorm(.N, mean = 100, sd = 10)]
+
+# Generate unit-specific effects for treatment with mean 0 and sd 10, In addition to the unit-specific effects 
+# for overall outcome(labor income in our case), we will generate unit-specific effects for treatment. 
+# These effects capture the individual-level variation in how individuals respond to the treatment.
+# This is crucial for modeling heterogeneous treatment effects, which is a key aspect discussed by Sun and Abraham.  
+individuals[, treatment_unit_effect := rnorm(.N, mean = 0, sd = 10)]
+
+### Assumptions in Sun and Abraham's Paper
+
+# Sun and Abraham assumed that the effect of the treatment is the same for units within the same cohort, 
+# meaning that the units in the same cohort are homogeneous. Cohorts are defined based on the timing of the treatment.
+# In Assumption 3 of their paper, the authors assumed that the heterogeneity of the treatment effect for each
+# relative period \( \ell \), denoted as \( \text{CATT}_{e,\ell} \), does not depend on the cohort \( e \).
+# This means that the treatment path is not affected by the cohort-specific effects.
+
+# When this assumption is relaxed, we can observe differences in treatment effects across cohorts. 
+# This relaxation allows us to explore the implications of treatment effect heterogeneity, which can reveal how varying
+# initial conditions or unobserved factors across cohorts influence the outcomes. 
+# In our artificial data, we are allowing for more heterogeneity by not assuming homogeneous units under the same cohorts.
+# This scenario is more reflective of real-world conditions where individuals' responses to treatment can vary
+# significantly based on their unique characteristics and circumstances.
+
+# So basically, what we are counting in the treatment effect is:
+
+## The expected treatment effect in each lag. We will define this below. 
+## The unit-specific effect of the treatment, so that every unit is responding differently to the treatment.
+## The time-specific effect of the treatment, so that the time of the treatment will be effective on the effect of the treatment.
+
+
+# Merge the treatment time, unit_fixed_effect, and treatment_unit_effect back into the main dataset.
+data <- merge(data, individuals, by = c("id","treated"))
+
+# For the time-fixed effects, We would like to build a realistic scene. As the tenure and experience in the
+# labor market increases (as years pass by), our outcome (income in this case), will have a deterministic upwards trend.
+# Also, it should have cycles according to the business cycles or seasonalities that effects nearly everyone. 
+# So, by integrating a deterministic trend and an ARMA model together, we can achieve this realistic scenario.
+
+# We propose ARMA(4,2) model in here, while the AR part will generate near-unit root process. 
+# We assume that the shocks that happen externally has a long-lasting effects on income, but those effects are decreasing over time.
+# Economic and financial data often show complex patterns that cannot be captured by simpler models.
+# An ARMA(4,2) process is flexible enough to capture various patterns, such as cyclical behaviors and seasonal effects,
+# making it a suitable choice for simulating realistic time-fixed effects:
+# Define ARMA model parameters
+arma_params <- list(order = c(4, 0, 2), ar = c(0.4, 0.29, 0.11, 0.18), ma = c(0.3, -0.2), sd = 1)
+
+# Generate deterministic trend and drift
+n_years <- 30
+drift <- 10
+trend <- 0.1 * (1:n_years)
+
+# Generate ARMA(4,2) process
+arma_process <- arima.sim(n = n_years, model = arma_params)
+
+# Combine the deterministic part with the ARMA process
+time_fixed_effects <- drift + trend + arma_process
+
+# And let's plot the time_fixed_effects:
+plot(time_fixed_effects)
+
+# At the first look, assuming that there will be no death or retirement of the individuals, this graph is usable. 
+
+# Generate ARMA process for individual dynamic trends. We are assuming that this is the part of the individual characteristics
+# that change over time, but the shocks happened in the past have significant effects in the medium run for the individuals.
+# We are using ARMA(4,2) model again to include seasonality effects. 
+dynamic_trend_indv <- t(replicate(n_individuals, arima.sim(n = n_years, model = arma_params)))
+
+# Reshape dynamic_trend_indv to match the structure of data:
+dynamic_trend_indv_dt <- as.data.table(dynamic_trend_indv)
+dynamic_trend_indv_dt[, id := 1:.N]
+dynamic_trend_indv_long <- melt(dynamic_trend_indv_dt, id.vars = "id", variable.name = "year", value.name = "dynamic_trend_indv")
+dynamic_trend_indv_long[, year := as.integer(sub("V", "", year))]
+
+# Merge the dynamic trend per individual back into the main dataset:
+data <- merge(data, dynamic_trend_indv_long, by = c("id", "year"))
+
+
+# Initialize the treatment effect. We will hold the assumption that there will be no effects of the treatment before the treatment starts.
+# I would like to see that if the proposed model yields out any significant coefficients of the leads at the end. 
+
+# Moreover, we are assuming that the unit-specific effect of the treatment is independent from the unit-fixed effects. 
+# That means, the unobserved features that effects the unit-fixed effects in the outcome has no impact on the 
+# unit-specific effect of the treatment. 
+# The expected effect of the treatment at the treatment time will be -50, and follow an AR(1) process with the coefficient of 0.75. 
+# Also, we will test what happens when the expected_treatment effect is correlated with the unit_fixed effect.
+
+
+data[, expected_treatment_effect := ifelse(year >= treatment_time & treated == 1, 
+                                  {te <- rep(0, .N); 
+                                  te[year == treatment_time] <- - 50;
+                                  for (t in (which(year == treatment_time) + 1):.N) {
+                                    te[t] <- 0.75 * te[t-1]
+                                  } 
+                                  te}, 0), by = id]
+
+data[, expected_treatment_effect_correlated := ifelse(year >= treatment_time & treated == 1, 
+                                  {te <- rep(0, .N); 
+                                  te[year == treatment_time] <- -1* mean(unit_fixed_effect) * 0.5; 
+                                  for (t in (which(year == treatment_time) + 1):.N) {
+                                    te[t] <- 0.75 * te[t-1]
+                                  } 
+                                  te}, 0), by = id]
+# Add a white noise component to the treatment effect
+data[year >= treatment_time, treatment_effect_wrandom := expected_treatment_effect + rnorm(.N, mean = 0, sd = 1)]
+# Set the treatment effect with random = 0 before the treatment time:
+data[, treatment_effect_wrandom := ifelse(is.na(treatment_effect_wrandom), 0, treatment_effect_wrandom)]
+
+
+# Generate correlated time-fixed effects for treatment. The reason is that, we know that the time that the treatment was received 
+# is effective on the treatment effect.
+# I wanted to make it correlated with the time_fixed effects, so the treatment effect will be slightly dependent on the general situation
+# in the time_fixed_effects. That being said, in the previous part, we assumed that the unit_fixed effects are not correlated
+# with the unit_fixed effect of the treatment, even it is not a realistic assumption and we will test 
+# what happens if we relax that assumption. It is nearly not realistic to assume that the time_fixed effect of the treatment 
+# is not related with the time_fixed effects. 
+correlation_factor <- 0.2
+time_fixed_effects_treatment <- correlation_factor * time_fixed_effects + 
+  (1 - correlation_factor) * rnorm(n_years, mean = 0, sd = 20)
+
+# Add a column for treatment time-fixed effect.
+data[, treatment_time_fixed_effect := time_fixed_effects_treatment[treatment_time]]
+
+# To help the function to work, let's create the time_difference variable, 
+# because we will test the leads and the lags of the treatment effect:
+data[, time_difference := year - treatment_time]
+
+# Add significant pre-treatment effect 3 periods before treatment starts. 
+data[, pre_treatment_effect := ifelse(time_difference %in% c(-3,-2,-1) & treated == 1, -20, 0)]
+
+data[, u_it := rnorm(.N, mean = 0, sd = 1)]
+
+# Ensure the treatment_time_fixed_effect is applied only after the treatment time. 
+data[year < treatment_time, treatment_time_fixed_effect := 0]
+data[, time_fixed_effects := time_fixed_effects[year]]
+data[, treatment_time_fixed_effect := ifelse(is.na(treatment_time_fixed_effect), 0, treatment_time_fixed_effect)]
+data[, treatment_unit_effect := ifelse(time_difference < 0, 0, treatment_unit_effect)]
+
+
+# Now, let's build up the model variations that we have mentioned before.
+data[, y_0 := unit_fixed_effect + time_fixed_effects + treatment_effect_wrandom + u_it]
+data[, y_1 := unit_fixed_effect + time_fixed_effects + treatment_effect_wrandom + dynamic_trend_indv + u_it]
+data[, y_2 := unit_fixed_effect + time_fixed_effects + expected_treatment_effect_correlated + u_it]
+data[, y_3 := unit_fixed_effect + time_fixed_effects + treatment_effect_wrandom + pre_treatment_effect + u_it]
+data[, y_4 := unit_fixed_effect + time_fixed_effects + treatment_effect_wrandom + treatment_unit_effect + u_it]
+data[, y_5 := unit_fixed_effect + time_fixed_effects + treatment_effect_wrandom + treatment_time_fixed_effect + u_it]
+data[, y_6 := unit_fixed_effect + time_fixed_effects + expected_treatment_effect_correlated + pre_treatment_effect + treatment_unit_effect + treatment_time_fixed_effect + dynamic_trend_indv + u_it]
+data_check <- data[year >= treatment_time, .(mean(treatment_effect_wrandom, na.rm = TRUE), sd(treatment_effect_wrandom, na.rm = TRUE)), by = time_difference]
+data[, treatment_time := ifelse(is.na(treatment_time), -999, treatment_time)]
+data[, time_difference := ifelse(is.na(time_difference), year - treatment_time, time_difference)]
+
+```
+
+## Function explanation
+
+We have taken the function's code from fixest package, we will comment on the steps in the function in here, but directly use the sunab() function in the results.
+
+```{r function, echo= TRUE}
+sunab_explanation = function(cohort, period, ref.c = NULL, ref.p = -1, bin = NULL, bin.rel = NULL, 
+                 bin.c, bin.p, att = FALSE, no_agg = FALSE){
+  # Function 'sunab' calculates dynamic treatment effects with options for binning periods and cohorts
+  # This function is designed to address the issues of heterogeneous treatment effects and variation in treatment timing, as discussed by Sun and Abraham (2021).
+  
+  check_arg(cohort, "mbt vector") # Ensure 'cohort' is a vector of type 'mbt'
+  check_arg(period, "mbt vector len(data)", .data = cohort) # Ensure 'period' is a vector with the same length as 'cohort'
+  check_arg(ref.c, "NULL vector no na") # Ensure 'ref.c' is either NULL or a vector without NA values
+  check_arg(att, no_agg, "logical scalar") # Ensure 'att' and 'no_agg' are logical scalars
+  check_arg(bin, bin.c, bin.p, bin.rel, "NULL list | vector") # Ensure binning arguments are either NULL, lists, or vectors
+  
+  cohort_name = deparse_long(substitute(cohort)) # Get the name of the 'cohort' variable
+  period_name = deparse_long(substitute(period)) # Get the name of the 'period' variable
+  period_name = gsub("^[[:alpha:]][[:alpha:]_\\.]*\\$", "", period_name) # Remove prefix from 'period' variable name
+  
+  is_bin = !missnull(bin) # Check if 'bin' is not NULL
+  is_bin.c = !missnull(bin.c) # Check if 'bin.c' is not NULL
+  is_bin.p = !missnull(bin.p) # Check if 'bin.p' is not NULL
+  
+  if(is_bin && (is_bin.c || is_bin.p)){
+    stop("You cannot have the argument 'bin' with the arguments 'bin.p' or 'bin.c' at the same time. Use only the latter.")
+    # Error if 'bin' is used with 'bin.c' or 'bin.p', to avoid conflicting binning strategies
+  }
+  
+  n_origin = length(cohort) # Store original length of 'cohort'
+  IS_NA = which(is.na(cohort) | is.na(period)) # Identify indices with NA in 'cohort' or 'period'
+  ANY_NA = length(IS_NA) > 0 # Check if there are any NA values
+  if(ANY_NA){
+    cohort = cohort[-IS_NA] # Remove NA values from 'cohort'
+    period = period[-IS_NA] # Remove NA values from 'period'
+  }
+  
+  n = length(cohort) # Get the length of 'cohort' after removing NAs
+  
+  period_unik = unique(period) # Get unique values of 'period'
+  cohort_unik = unique(cohort) # Get unique values of 'cohort'
+  
+  if(is_bin.c){
+    cohort = bin_factor(bin.c, cohort, cohort_name) # Bin 'cohort' using 'bin.c'
+    cohort_unik = unique(cohort) # Update unique values of 'cohort'
+  }
+  
+  if(is_bin.p){
+    period = bin_factor(bin.p, period, period_name) # Bin 'period' using 'bin.p'
+    period_unik = unique(period) # Update unique values of 'period'
+  }
+  
+  # Determine if we are dealing with relative periods (Case 1) or absolute periods (Case 2)
+  is_CASE_1 = FALSE # Initialize CASE 1 flag
+  if(is.numeric(period) && 0 %in% period_unik && min(period_unik) < 0 && max(period_unik) > 0){
+    # Case 1: 'period' contains relative periods (both negative and positive values)
+    is_CASE_1 = TRUE
+    
+    if(is_bin){
+      stop("You cannot use 'bin' when the argument 'period' contains relative periods. To use 'bin', 'period' should represent \"calendar\" periods.")
+      # Error if 'bin' is used with relative 'periods'
+    }
+    
+  } else {
+    
+    if(is_bin){
+      period = bin_factor(bin, period, period_name) # Bin 'period' using 'bin'
+      cohort = bin_factor(bin, cohort, cohort_name, no_error = TRUE) # Bin 'cohort' using 'bin'
+      
+      period_unik = unique(period) # Update unique values of 'period'
+      cohort_unik = unique(cohort) # Update unique values of 'cohort'
+    }
+    
+    refs = setdiff(cohort_unik, period_unik) # Find cohorts that are not in 'periods'
+    
+    if(length(refs) == length(cohort_unik)){
+      stop("Problem in the creation of the relative time periods. We expected the cohort to be the treated period, yet not a single 'cohort' value was found in 'period'.")
+      # Error if no cohort values are found in period values
+    }
+    
+    qui_keep = which(!cohort %in% refs) # Indices of cohorts that are valid (not in 'refs')
+    cohort_valid = cohort[qui_keep] # Subset valid 'cohort' values
+    period_valid = period[qui_keep] # Subset valid 'period' values
+    
+    if(is.numeric(period_valid) || is.numeric(cohort_valid)){
+      if(!is.numeric(cohort_valid)) cohort_valid = as.numeric(cohort_valid) # Convert 'cohort_valid' to numeric if not already
+      if(!is.numeric(period_valid)) period_valid = as.numeric(period_valid) # Convert 'period_valid' to numeric if not already
+      
+      rel_period = period_valid - cohort_valid # Calculate relative period
+    } else {
+      sunik_period = sort(unique(period_valid)) # Sort unique valid periods
+      dict_period = seq_along(sunik_period) # Create a sequence along unique valid periods
+      names(dict_period) = sunik_period # Name the sequence with unique valid periods
+      
+      period_valid = dict_period[as.character(period_valid)] # Map valid periods to their indices
+      cohort_valid = dict_period[as.character(cohort_valid)] # Map valid cohorts to their indices
+      
+      rel_period = period_valid - cohort_valid # Calculate relative period
+    }
+    
+    new_period = rep(-1, n) # Initialize new_period with -1 (indicating always treated)
+    new_period[qui_keep] = rel_period # Assign calculated relative periods
+    
+    period = new_period # Update period with new_period
+  }
+  
+  period_min = min(period) # Minimum value of period
+  period_max = max(period) # Maximum value of period
+  period_list = list(.F = period_min, .L = period_max) # Create a list with period_min and period_max
+  check_set_arg(ref.p, "evalset integer vector no na", .data = period_list) # Ensure ref.p is a valid integer vector within period_list
+  
+  cohort_int = quickUnclassFactor(cohort) # Convert cohort to integer factors
+  c_order = order(cohort_int) # Order cohort_int
+  
+  info = cpp_find_never_always_treated(cohort_int[c_order], period[c_order]) # Find never and always treated groups
+  
+  if(!is.null(ref.c)){
+    qui_drop = which(cohort_int %in% info$ref | period %in% ref.p | cohort %in% ref.c) # Indices to drop based on reference conditions
+  } else {
+    qui_drop = which(cohort_int %in% info$ref | period %in% ref.p) # Indices to drop based on reference periods
+  }
+  qui_NA = info$always_treated # Indices of always treated groups
+  
+  cohort = cohort[-qui_drop] # Remove reference groups from cohort
+  period = period[-qui_drop] # Remove reference groups from period
+  
+  if(!missing(bin.rel)){
+    period = bin_factor(bin.rel, period, "relative period") # Bin relative periods
+  }
+  
+  res_raw = i(factor_var = period, f2 = cohort, f_name = period_name) # Perform factor analysis
+  
+  if(ANY_NA){
+    res = matrix(NA_real_, nrow = n_origin, ncol = ncol(res_raw), dimnames = list(NULL, colnames(res_raw))) # Initialize result matrix with NA
+    res[-IS_NA, ][qui_drop, ] = 0 # Set dropped indices to 0
+    res[-IS_NA, ][-qui_drop, ] = res_raw # Assign raw results to valid indices
+    if(length(qui_NA) > 0){
+      res[-IS_NA, ][qui_NA, ] = NA_real_ # Set always treated indices to NA
+    }
+  } else {
+    res = matrix(0, nrow = n_origin, ncol = ncol(res_raw), dimnames = list(NULL, colnames(res_raw))) # Initialize result matrix with 0
+    res[-qui_drop, ] = res_raw # Assign raw results to valid indices
+    if(length(qui_NA) > 0){
+      res[qui_NA, ] = NA_real_ # Set always treated indices to NA
+    }
+  }
+  
+  if(!no_agg){
+    is_GLOBAL = FALSE # Initialize GLOBAL flag
+    for(where in 1:min(8, sys.nframe())){
+      if(exists("GLOBAL_fixest_mm_info", parent.frame(where))){
+        GLOBAL_fixest_mm_info = get("GLOBAL_fixest_mm_info", parent.frame(where)) # Get GLOBAL_fixest_mm_info if exists
+        is_GLOBAL = TRUE # Set GLOBAL flag to TRUE
+        break
+      }
+    }
+    
+    if(is_GLOBAL){
+      agg_att = c("ATT" = paste0("\\Q", period_name, "\\E::[[:digit:]]+:cohort")) # Define ATT aggregation
+      agg_period = paste0("(\\Q", period_name, "\\E)::(-?[[:digit:]]+):cohort") # Define period aggregation
+      
+      if(att){
+        agg = agg_att # Set aggregation to ATT if att is TRUE
+      } else {
+        agg = agg_period # Set aggregation to period
+        
+        info = list()
+        period_unik = sort(unique(c(period, ref.p))) # Get unique periods including ref.p
+        info$coef_names_full = paste0(period_name, "::", period_unik) # Define full coefficient names
+        info$items = period_unik # Set items to unique periods
+        
+        if(length(ref.p) > 0){
+          info$ref_id = c(which(info$items %in% ref.p[1]), which(info$items %in% ref.p[-1])) # Set reference IDs
+          info$ref = info$items[info$ref_id] # Set reference items
+        }
+        
+        info$f_name = period_name # Set factor name
+        
+        info$is_num = TRUE # Set is_num to TRUE
+        info$is_inter_num = info$is_inter_fact = FALSE # Set interaction flags to FALSE
+        
+        attr(agg, "model_matrix_info") = info # Add model matrix info attribute to aggregation
+      }
+      
+      GLOBAL_fixest_mm_info$sunab = list(agg = agg, agg_att = agg_att, 
+                                         agg_period = agg_period, ref.p = ref.p) # Update GLOBAL_fixest_mm_info with sunab details
+      
+      assign("GLOBAL_fixest_mm_info", GLOBAL_fixest_mm_info, parent.frame(where)) # Re-assign GLOBAL_fixest_mm_info
+    }
+  }
+  
+  res # Return the result matrix
+}
+
+```
+
+## Results
+
+Let's obtain the results from Sun and Abraham method of estimation for the leads -5 to lags 5, then compare the estimation with the expected results of those coefficients. We know the expected results of the coefficients since we have generated the data by ourselves.
+
+```{r results-initial}
+
+# Define the periods
+lead_lag_periods <- c(paste0("year::", -5:-1), "year::0", paste0("year::", 1:5))
+
+# Define expected effects for each model variation
+expected_effects_list <- list(
+  c(rep(0, 5), -50, -50 * 0.75, -50 * 0.75^2, -50 * 0.75^3, -50 * 0.75^4, -50 * 0.75^5),
+  c(rep(0, 5), -50, -50 * 0.75, -50 * 0.75^2, -50 * 0.75^3, -50 * 0.75^4, -50 * 0.75^5),
+  c(rep(0, 5), -100 * 0.5, -100 * 0.5 * 0.75, -100 * 0.5 * 0.75^2, -100 * 0.5 * 0.75^3, -100 * 0.5 * 0.75^4, -100 * 0.5 * 0.75^5),
+  c(0, 0, -20, -20, -20, -50, -50 * 0.75, -50 * 0.75^2, -50 * 0.75 * 0.75^3, -50 * 0.75 * 0.75^4, -50 * 0.75^5),
+  c(rep(0, 5), -50, -50 * 0.75, -50 * 0.75^2, -50 * 0.75 * 0.75^3, -50 * 0.75^4, -50 * 0.75^5),
+  c(rep(0, 5), -50, -50 * 0.75, -50 * 0.75^2, -50 * 0.75 * 0.75^3, -50 * 0.75^4, -50 * 0.75^5),
+  c(0, 0, -20, -20, -20, -100 * 0.5, -100 * 0.5 * 0.75, -100 * 0.5 * 0.75^2, -100 * 0.5 * 0.75^3, -100 * 0.5^5)
+)
+
+# Initialize a list to store comparison tables for each variation
+comparison_list <- list()
+
+# Function to create comparison table for each variation
+create_comparison_table <- function(outcome_var, expected_effects) {
+  # Fit the Sun and Abraham model for the current variation
+  sunab_formula <- as.formula(paste(outcome_var, "~ sunab(treatment_time, year) | id + year"))
+  sunab_model <- feols(sunab_formula, data = data, panel.id = ~id + year)
+  
+  # Extract the detailed ATT from the Sun and Abraham model
+  sunab_summary <- summary(sunab_model)
+  sunab_coefs <- sunab_summary$coeftable
+  
+  # Filter rows based on the period between -5 and 5
+  relevant_rows <- rownames(sunab_coefs)[grepl("year::-(5|4|3|2|1)$|year::0$|year::(1|2|3|4|5)$", rownames(sunab_coefs))]
+  
+  # Create a new data.table with the relevant columns
+  filtered_data <- data.table(
+    Period = relevant_rows,
+    Estimate = sunab_coefs[relevant_rows, "Estimate"],
+    PValue = sunab_coefs[relevant_rows, "Pr(>|t|)"]
+  )
+  
+  # Create a new data.table with expected values
+  expected_data <- data.table(
+    Period = lead_lag_periods,
+    Expected = expected_effects
+  )
+  
+  # Merge the filtered data with expected values
+  comparison <- merge(filtered_data, expected_data, by = "Period", all = TRUE)
+  
+  return(comparison)
+}
+
+# Iterate through each model variation
+for (i in 0:6) {
+  outcome_var <- paste0("y_", i)
+  expected_effects <- expected_effects_list[[i + 1]]
+  comparison_table <- create_comparison_table(outcome_var, expected_effects)
+  
+  # Add the comparison table to the list
+  comparison_list[[paste0("Variation_", i)]] <- comparison_table[, .(Period, Estimate, PValue)]
+  
+  # Combine estimates and p-values into a single column
+  comparison_list[[paste0("Variation_", i)]][, Combined := paste0(round(Estimate, 4), " (", format.pval(PValue, digits = 3, eps = .001), ")")]
+  
+  # Keep only the combined column and the period
+  comparison_list[[paste0("Variation_", i)]] <- comparison_list[[paste0("Variation_", i)]][, .(Period, Combined)]
+  
+  # Rename the Combined column to the current variation
+  setnames(comparison_list[[paste0("Variation_", i)]], "Combined", paste0("Estimate_Var_", i))
+}
+
+# Combine all comparison tables into one
+final_comparison_table <- Reduce(function(...) merge(..., by = "Period", all = TRUE), comparison_list)
+
+# Add the expected effects to the final table
+final_comparison_table <- merge(final_comparison_table, data.table(Period = lead_lag_periods, Expected = expected_effects_list[[1]]), by = "Period", all = TRUE)
+
+# Convert Period column to a factor to ensure proper ordering
+final_comparison_table[, Period := factor(Period, levels = lead_lag_periods)]
+
+# Sort the table by Period
+final_comparison_table <- final_comparison_table[order(Period)]
+
+# Add expected values for variations 3 and 6
+expected_var3_6 <- expected_effects_list[[1]] # Start with the default expected values
+expected_var3_6[lead_lag_periods %in% c("year::-3", "year::-2", "year::-1")] <- -20 # Modify the specific periods (-3, -2, -1)
+final_comparison_table[, `Expected_Var3_6` := expected_var3_6]
+
+
+
+# Print the final formatted comparison table using kable for better formatting
+kable(final_comparison_table, format = "html", caption = "Comparison of Estimated and Expected Effects with P-Values") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F)
+
+```
+
+The table provides estimates for various model specifications, with a particular focus on the performance of the Sun and Abraham (2021) method under different data generating processes (DGPs).
+
+### Initial Model (Variation 0)
+
+-   **Estimate_Var_0**: The coefficients for the lags correctly capture the treatment effect, with an immediate treatment effect at year 0 of approximately -50, aligning with the expected value. The lead effects are not significantly different from zero, indicating no pre-treatment effects.
+-   **Comments**: The initial model performs well, accurately estimating the treatment effects under the model specification used in the original paper without the heterogeneous treatment effects.
+
+One of the key points of this result is that the treatment effect at year == -2 is found as significant at 10%, even though we did not introduce any treatment effect before the treatment starts. Nevertheless, we will take the results in this variation as a benchmark to check the results of the other variations. 
+
+### Model with dynamic trend per individual (Variation 1)
+
+-   **Estimate_Var_1**: The estimates remain similar to the initial model, indicating that adding a dynamic trend per individual does not significantly alter the treatment effect estimates.
+-   **Comments**: The inclusion of individual-specific dynamic trends with mean 0 does not significantly impact the results, demonstrating the robustness of the Sun and Abraham method to such variations. However, the model estimated the effect of the treatment slightly less effective compared to initial model, so we have learned that when we introduced dynamic changes in the individual characteristics, the Sun and Abraham model may be tend to estimate the treatment effects lower than the expected value of the treatment effects in absolute terms.
+
+The significance of the leads are in line with the initial model (variation 1).
+
+### Model with Correlated Treatment Effect (Variation 2)
+
+-   **Estimate_Var_2**: The treatment effect estimates are similar to those in the initial model, although the treatment effects are slightly underestimated in absolute terms.
+-   **Comments**: The method handles correlated treatment effects reasonably well, despite a slight underestimation of the treatment effects in absolute terms compared to initial model.
+
+The significance of the leads are in line with the initial model (variation 1).
+
+### Model with Pre-Treatment Effects (Variation 3)
+
+-   **Estimate_Var_3**: Unexpectedly, the model estimates significant positive treatment effects for years -5 and -4, periods before the pre-treatment effect is introduced at year -3. These positive estimates are counterintuitive. Also, what we see at year = 0 and after is that the effect of the treatment has underestimated in absolute terms due to the availability of the pre-treatment effects for the treated ones.
+-   **Comments**: This suggests that the Sun and Abraham method may misattribute the negative pre-treatment effects to earlier periods, indicating a potential limitation in identifying the correct timing of pre-treatment effects. What we have learned is that under the existence of the pre-treatment effects for the treated ones (Assumption 2 : No Anticipatory Behavior Prior to Treatment) is relaxed, the model suggested by Sun and Abraham attributes the pre-treatment effect to the leads where the pre-treatment effects do not exist, and also decreases the effect of the treatment in absolute terms.
+
+### Model with Unit-Specific Treatment Effect (Variation 4)
+
+-   **Estimate_Var_4**: When we introduced the unit-specific treatment effect, i.e. the units are giving unique responses to the treatment, some of the leads of the treatment effect have become significant while the treatment effects after the treatment are underestimated in absolute terms.
+-   **Comments**: The introduction of unit-specific treatment effects leads to underestimation, indicating that the model may struggle with significant heterogeneity in treatment responses. More importantly, even though we have not included any pre-treatment effects, the model found significant treatment effects before the treatment starts.
+
+According to the Wald Test, the Sun and Abraham model has failed to estimate the treatment effects as the true treatment effects especially for the lags 2,3,4 and 5. The sunab model has accounted the unit-specific treatment effects into the leads by making them significant even though they are not.  
+
+### Model with Time-Fixed Effect for Treatment (Variation 5)
+
+-   **Estimate_Var_5**: When we generated the outcome variable with a DGP including the time-fixed effect for treatment, i.e. the treatment effect varies according to when the treatment is received but the same for the units under the same cohort, we see that the coefficients of the treatment effects are significantly underestimated.
+-   **Comments**: In the paper, the authors said that under the scenario of heterogeneous treatment effects across cohorts, their model is more accurate and robust to the heterogeneity. In this variation, we allowed the treatment effect to vary for the cohorts and be correlated with the time fixed effects considering that the treatment effect can be correlated with the general trend in the time fixed effects, and what we've seen is that the coefficients of the estimated treatment effects are significantly underestimated compared to the other variations.
+
+Nevertheless, the sunab model estimated the treatment effects in a better way under when the heterogeneity comes from the treatment time compared to unit-specific treatment effects. At least, we don't see any significant coefficients of the leads in this variation. 
+
+```{r wald-test}
+# Given values
+estimated_coefficient <- -49.1857
+hypothesized_value <- -50
+standard_error <- 0.05965216
+
+# Calculate the variance
+variance <- standard_error^2
+
+# Calculate the Wald test statistic
+wald_statistic <- (estimated_coefficient - hypothesized_value)^2 / variance
+
+# Get the p-value from the chi-square distribution with 1 degree of freedom
+p_value <- 1 - pchisq(wald_statistic, df = 1)
+
+# Print the results
+cat("Wald Test Statistic:", wald_statistic, "\n")
+cat("P-value:", p_value, "\n")
+
+```
+
+**So, there is no chance that the estimate can be equal to -50, which is the true treatment effect.**
+
+As a bottom note, when we tried to run sample size with 1000, the estimation of the coefficient was -43, so as we increased the sample size, the coefficient converged to the expected value.
+
+### Comprehensive Model (Variation 6)
+
+-   **Estimate_Var_6**: When we made the DGP complex and added all of the ingredients to the soup, we see that the model suggested by Sun and Abraham is totally far away from the true treatment effects.
+-   **Comments**: The comprehensive model highlights the difficulty of the Sun and Abraham method in distinguishing between actual treatment effects and pre-treatment effects under complex DGPs. This suggests a need for more sophisticated techniques to handle such complexity.
+
+### General Comments
+
+The findings indicate that while the Sun and Abraham method performs well under simpler DGPs, it struggles with the correct identification of pre-treatment effects. Especially, when we included the heterogeneity in the treatment effect according to the treatment time with sample size = 1000, their model was not available to cover that heterogeneity as the paper mentioned, so the estimates of the coefficients was not equal to the true treatment effects. 
+
+Moreover, when we compare the results from the variations (we are excluding the variations 3 and 6 where we included the pre-treatment effects because we were not shocked to see those incorrect results according to the paper), the model suggested by Sun and Abraham model were comparably better when the heterogeneity in the treatment effect is based on the time of the treatment. When the heterogeneity comes from the unit-specific treatment effects, i.e the units are responding to the treatment differently, unfortunately the model has failed to capture the true effects of the treatment, more interestingly, it reported significant pre-trends even though there are no pre-trends in the true DGP. 
+
+**According to the results obtained from variation 4 and 5, we can say that it is safe to use Sun and Abraham method when we know the fact that the treatment effect is not varying a lot across units, but varying across the time of the treatment received.**  
+
+Future work should consider refining the method to improve its robustness in complex settings with small sample size, possibly incorporating techniques specifically designed to detect and account for pre-treatment trends and heterogeneous treatment effects across the units.
+
+### Conclusion
+
+The Sun and Abraham (2021) method demonstrates robustness under simpler scenarios but faces challenges with pre-treatment effects. The observed misattribution of pre-treatment effects in Variations 3 and 6 suggests areas for methodological improvement to enhance its applicability in more realistic settings.
+
+Moreover, as the authors mentioned in their paper, the suggested model takes care of the heterogeneity based on the timing of the treatment, at least we see that the model found the pre-treatment effects insignificant under variation 5 where we introduced the mentioned heterogeneity into the DGP, and the coefficients of the treatment effects (year == 0 and onwards) are in line with the expectations. Even though the possibility of the coefficients equal to the true coefficients of the true DGP, personally I've observed that as we increased the sample size, the coefficients of the year >= 0 converge to the true coefficients. 
+
+However, when the heterogeneity varies on the responses of the individuals to the treatment, we have seen that the Sun and Abraham model works worse than the expectation. Our results are in line with the authors claims that they are assuming that the heterogeneity is based on the timing of the treatment instead of the unit-specific effects. 
+
+
+# Part 2: Using Sun and Abraham estimator on Callaway and Sant'Anna (2021)
+
+We have selected the highly cited paper from Callaway and Sant'Anna (2021), "Difference-in-Differences with Multiple Time Periods".
+
+In Part 2, we will compare the methodologies and results of two influential papers in the field of econometrics: Callaway & Sant'Anna (2021) and Sun & Abraham (2021). Both papers address the estimation of treatment effects in Difference-in-Differences (DiD) settings with multiple time periods and heterogeneous treatment effects, but they approach the problem differently.
+
+We will use the empirical part of Effect of Minimum Wage on Teen Employment: Replicating Callaway and Sant'Anna (2021). The dataset that we will use is the same dataset with the authors used in their original article.
+
+## Introduction and Comparison
+
+### Similarities
+
+1.  **Objective**: Both papers aim to improve the estimation of treatment effects in Difference-in-Differences (DiD) settings with multiple time periods and heterogeneous treatment effects.
+2.  **Dynamic Treatment Effects**: Both methods provide estimates of dynamic treatment effects, which capture the impact of treatment over time.
+3.  **Addressing Heterogeneity**: Both approaches consider the challenges posed by heterogeneous treatment effects across different units and time periods.
+
+### Comparison of Methodologies
+
+#### **Two-Way Fixed Effects Regression**:
+
+-   **Sun & Abraham (2021)**: Identify contamination issues in two-way fixed effects regressions, where the coefficients on leads and lags of treatment can be biased by effects from other periods.
+-   **Callaway & Sant'Anna (2020)**: Do not primarily focus on this issue but provide a framework that can accommodate it by using more flexible identification strategies.
+
+#### **Alternative Estimator**:
+
+-   **Sun & Abraham (2021)**: Propose an alternative estimator that mitigates contamination and provides more reliable dynamic treatment effect estimates.
+-   **Callaway & Sant'Anna (2020)**: Offer a unified framework with multiple estimation methods, including outcome regression, inverse probability weighting, and doubly robust methods.
+
+#### **Event Studies Design**:
+
+-   **Sun & Abraham (2021)**: Emphasize the importance of cohort-specific average treatment effects (CATTe,ℓ) and highlight how contamination can bias these estimates.
+-   **Callaway & Sant'Anna (2020)**: Focus on group-time average treatment effects (ATT), providing a comprehensive framework for multiple periods and variations in treatment timing.
+
+#### **Pretrends and Homogeneity**:
+
+-   **Sun & Abraham (2021)**: Highlight problems with pretrend tests when treatment effects are heterogeneous, proposing conditions under which these tests can be valid.
+-   **Callaway & Sant'Anna (2020)**: Use robust inference methods that account for multiple testing, providing simultaneous confidence intervals for dynamic effects.
+
+#### **Implementation**:
+
+-   **Sun & Abraham (2021)**: Suggest a regression-based estimator that is more familiar to applied researchers.
+-   **Callaway & Sant'Anna (2020)**: Provide a flexible framework that includes various aggregation methods to highlight treatment effect heterogeneity and offer robust inference procedures.
+
+### Equations
+
+**Sun & Abraham (2021)**: - **Two-Way Fixed Effects Model**: $$
+  Y_{it} = \alpha_i + \lambda_t + \sum_{\ell} \mu_{\ell} \mathbf{1}\{t - E_i = \ell\} + \epsilon_{it}
+  $$ - **Cohort-Specific Average Treatment Effect (CATTe,ℓ)**: $$
+  \text{CATTe,ℓ} = E[Y_{i, e + \ell} - Y_{i, \infty} \mid E_i = e]
+  $$
+
+**Callaway & Sant'Anna (2020)**: - **Group-Time Average Treatment Effect (ATT)**: $$
+  \text{ATT}(g,t) = E[Y_t(1) - Y_t(0) \mid G = g, T = t]
+  $$ - **Estimation Using Outcome Regression**: $$
+  \hat{\text{ATT}}(g,t) = \frac{1}{N_g}\sum_{i \in G_g} (Y_{it} - \hat{m}_0(X_i, t))
+  $$ where $\hat{m}_0(X_i, t)$ is the estimated outcome regression for the control group.
+
+### Detailed Comparison
+
+1.  **Contamination Issues**:
+    -   **Sun & Abraham**: Explicitly address and provide solutions to contamination issues in two-way fixed effects regressions.
+    -   **Callaway & Sant'Anna**: Implicitly handle contamination by offering flexible identification strategies that can account for such issues.
+2.  **Handling Heterogeneity**:
+    -   **Sun & Abraham**: Focus on cohort-specific effects and propose methods to mitigate contamination from other periods.
+    -   **Callaway & Sant'Anna**: Provide a more flexible framework that can handle heterogeneity through different aggregation methods and robust inference.
+3.  **Pretrends Testing**:
+    -   **Sun & Abraham**: Discuss limitations and propose conditions for valid pretrend tests.
+    -   **Callaway & Sant'Anna**: Use simultaneous inference procedures that are robust to multiple testing issues, providing more reliable pretrend assessments.
+4.  **Aggregation and Weights**:
+    -   **Sun & Abraham**: Use regression-based estimators for more interpretable dynamic effects.
+    -   **Callaway & Sant'Anna**: Offer various aggregation schemes to capture treatment effect heterogeneity, allowing for more detailed insights into dynamic effects.
+5.  **Empirical Applications**:
+    -   **Sun & Abraham**: Focus on contamination issues using a regression-based approach that is more intuitive for applied researchers.
+    -   **Callaway & Sant'Anna**: Apply their methods to a wide range of empirical settings, demonstrating the flexibility and robustness of their framework.
+
+By examining these differences and similarities, we gain a deeper understanding of how each approach addresses the challenges of estimating treatment effects in DiD settings with multiple periods and heterogeneous effects. This comparison helps us appreciate the strengths and limitations of each method and their applicability to different empirical contexts.
+
+
+
+-   **lemp** This is the log of county-level teen employment. It is the outcome variable
+
+-   **first.treat** This is the period when a state first increases its minimum wage. It can be 2004, 2006, or 2007. It is the variable that defines group in this application
+
+-   **year** This is the year and is the time variable
+
+-   **countyreal** This is an id number for each county and provides the individual identifier in this panel data context
+
+## Explanation of Unconditional and Conditional Parallel Trends in Callaway and Sant'Anna's original results
+
+In the analysis by Callaway and Sant'Anna (2021), the authors distinguish between two types of parallel trends assumptions:
+
+### Unconditional Parallel Trends
+
+Unconditional parallel trends assume that, in the absence of treatment, the average outcomes for treated and control groups would follow the same trend over time. This assumption does not account for any observable characteristics that might influence the outcome. It is a strong assumption because it implies that the treatment is the only difference between the groups.
+
+### Conditional Parallel Trends
+
+Conditional parallel trends relax the unconditional assumption by allowing parallel trends to hold after conditioning on observable covariates. This means that the average outcomes for treated and control groups would follow the same trend over time, conditional on some covariates. By controlling for these covariates, this assumption becomes more plausible, as it accounts for observable differences between the groups that could affect the outcome.
+
+### Callaway and Sant'Anna Estimation Results
+
+We will now present the results from Callaway and Sant'Anna (2021) using the unconditional parallel trends assumption. Let's check the results per group and per time first, and graph the plot.
+
+Also, we will comment on the results during the comparison.
+
+```{r cs_unconditional_results, message=FALSE, warning=FALSE}
+# Estimating group-time average treatment effects under unconditional parallel trends
+out_unconditional <- att_gt(yname = "lemp",
+                            gname = "first.treat",
+                            idname = "countyreal",
+                            tname = "year",
+                            xformla = ~1, # No covariates
+                            data = db,
+                            est_method = "reg"
+                            )
+
+# Summary of results
+summary(out_unconditional)
+
+# Plotting the results
+ggdid(out_unconditional, ylim = c(-.25,.1))
+```
+
+Now, the interesting part is the dynamic estimation of Callaway and Sant'Anna's model with the unconditional parallel trends.
+
+```{r cs_unconditional_dynamic, message = FALSE, warning= FALSE}
+# Dynamic effects
+es_unconditional <- aggte(out_unconditional, type = "dynamic")
+summary(es_unconditional)
+ggdid(es_unconditional)
+```
+
+After showcasing the results of the unconditional parallel trends, let's focus on what happens when we condition on the observable outcomes. The observable variables given in the dataset are: Population of the county (pop), proportion of the white population (white), proportion of the black population (black), number of high school graduates (hs), proportion of college graduates (col), median income (medinc) and poverty rate (pov). Since we are not sure which variables that the authors used in the original estimation, we will include them together.
+
+```{r cs_conditional_results, message=FALSE, warning=FALSE}
+# Estimating group-time average treatment effects under conditional parallel trends
+out_conditional <- att_gt(yname = "lemp",
+                          gname = "first.treat",
+                          idname = "countyreal",
+                          tname = "year",
+                          xformla = ~pop + white + black + hs + col + medinc + pov,
+                          data = db,
+                          est_method = "reg"
+                          )
+
+# Summary of results
+summary(out_conditional)
+
+# Plotting the results
+ggdid(out_conditional, ylim = c(-.25,.1))
+
+```
+
+And the dynamic estimation of Callaway and Sant'Anna's model with conditional parallel trends:
+
+```{r cs_conditional_dynamic, message=FALSE, warning=FALSE}
+# Dynamic effects
+es_conditional <- aggte(out_conditional, type = "dynamic")
+summary(es_conditional)
+ggdid(es_conditional)
+```
+
+### Sun and Abraham Estimation with the same dataset
+
+Now, let's estimate the dynamic treatment effects with the suggested model from Sun and Abraham (2021).
+
+```{r sunab_csdata, message= FALSE, warning=FALSE}
+# Sun and Abraham estimator
+sun_ab_out <- feols(lemp ~ sunab(first.treat, year) | countyreal + year, data = db)
+
+# Summary of results
+summary(sun_ab_out)
+
+# Plotting the results
+iplot(sun_ab_out)
+```
+
+## Comparison of the methods
+
+```{r comparison_part2}
+# Extracting and summarizing the dynamic effects for unconditional results
+dynamic_effects_cs_unconditional <- data.frame(
+  Period = es_unconditional$egt,
+  Estimate_CS_Unconditional = es_unconditional$att.egt,
+  Std_Error_CS_Unconditional = es_unconditional$se.egt,
+  PValue_CS_Unconditional = 2 * pnorm(-abs(es_unconditional$att.egt / es_unconditional$se.egt))
+)
+
+# Extracting and summarizing the dynamic effects for conditional results
+dynamic_effects_cs_conditional <- data.frame(
+  Period = es_conditional$egt,
+  Estimate_CS_Conditional = es_conditional$att.egt,
+  Std_Error_CS_Conditional = es_conditional$se.egt,
+  PValue_CS_Conditional = 2 * pnorm(-abs(es_conditional$att.egt / es_conditional$se.egt))
+)
+
+# Extracting and summarizing the dynamic effects from Sun and Abraham
+sunab_effects <- summary(sun_ab_out)$coeftable
+sunab_effects <- data.frame(
+  Period = as.integer(gsub("year::", "", rownames(sunab_effects))),
+  Estimate_SA = sunab_effects[, "Estimate"],
+  Std_Error_SA = sunab_effects[, "Std. Error"],
+  PValue_SA = sunab_effects[, "Pr(>|t|)"]
+)
+
+# Adjusting periods for comparison because the estimation of sunab do not yield out the year == -1.
+sunab_effects <- sunab_effects[sunab_effects$Period != -6, ]
+sunab_effects <- rbind(sunab_effects, data.frame(Period = -1, Estimate_SA = NA, Std_Error_SA = NA, PValue_SA = NA))
+
+# Merging the results into a single data frame for comparison
+comparison_df <- merge(dynamic_effects_cs_unconditional, sunab_effects, by = "Period", all = TRUE)
+comparison_df <- merge(comparison_df, dynamic_effects_cs_conditional, by = "Period", all = TRUE)
+
+# Add significance levels to the estimates.
+add_significance <- function(est, pval) {
+  sig <- ifelse(pval < 0.01, "***", ifelse(pval < 0.05, "**", ifelse(pval < 0.1, "*", "")))
+  sprintf("%.4f%s", est, sig)
+}
+
+# Formatting the table in an academical way:
+library(dplyr)
+
+formatted_comparison_df <- comparison_df %>%
+  mutate(
+    Estimate_CS_Unconditional = add_significance(Estimate_CS_Unconditional, PValue_CS_Unconditional),
+    Std_Error_CS_Unconditional = sprintf("(%.4f)", Std_Error_CS_Unconditional),
+    Estimate_SA = add_significance(Estimate_SA, PValue_SA),
+    Std_Error_SA = sprintf("(%.4f)", Std_Error_SA),
+    Estimate_CS_Conditional = add_significance(Estimate_CS_Conditional, PValue_CS_Conditional),
+    Std_Error_CS_Conditional = sprintf("(%.4f)", Std_Error_CS_Conditional)
+  ) %>%
+  select(Period,
+         Estimate_CS_Unconditional, Std_Error_CS_Unconditional,
+         Estimate_SA, Std_Error_SA,
+         Estimate_CS_Conditional, Std_Error_CS_Conditional) %>%
+  mutate(
+    Estimate_CS_Unconditional = paste0(Estimate_CS_Unconditional, "\n", Std_Error_CS_Unconditional),
+    Estimate_SA = paste0(Estimate_SA, "\n", Std_Error_SA),
+    Estimate_CS_Conditional = paste0(Estimate_CS_Conditional, "\n", Std_Error_CS_Conditional)
+  ) %>%
+  select(-Std_Error_CS_Unconditional, -Std_Error_SA, -Std_Error_CS_Conditional)
+
+# Display the formatted table
+formatted_comparison_df %>%
+  kable(format = "html", escape = FALSE, caption = "Comparison of Estimated Treatment Effects with Standard Errors and Significance Levels") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F) %>%
+  column_spec(2:4, width = "5em") %>%
+  add_header_above(c(" ", "Callaway & Sant'Anna Unconditional" = 1, "Sun & Abraham" = 1, "Callaway & Sant'Anna Conditional" = 1))
+
+```
+
+So according to the results, the first thing that catches the eye is that the estimated coefficients for the lags of the treatment are the same for unconditional Callaway & Sant'Anna and Sun & Abraham, and both are estimated higher (in absolute terms) for year 0 and 1 compared to conditional Callaway & Sant'Anna, and vice versa for year 2 and 3. However, the standard errors of the estimates are different from each other, so it showcase the difference between the methods. Additionally, there are notable differences in the detection of pre-trends across the methods.
+
+The estimates for the dynamic treatment effects are nearly identical between the CS Unconditional and SA methods. This similarity arises because both methods rely on similar assumptions and methodologies for estimating average treatment effects. Both approaches aim to control for fixed effects and other confounding variables, leading to comparable results. However, the difference in standard errors between the two methods can be attributed to the different techniques used for their calculation. Sun & Abraham's method might use robust standard errors or account for clustering differently, which affects the precision of the estimates.
+
+The CS Conditional method incorporates additional covariates to account for potential confounders. This leads to slight variations in the estimated treatment effects compared to the CS Unconditional and SA methods. By controlling for these covariates, the CS Conditional method can provide a more nuanced understanding of the treatment effects, particularly when there are significant confounders that affect the outcome variable.
+
+**Pre-Trends Detection**
+
+While the both conditional and unconditional CS results are saying that the pre-treatment effects are significant starting from year == -5 to the treatment except for year == -2, Sun and Abraham model implies the opposite of that claim. Since we don't know the true DGP right now, it is nearly impossible to tell which one is the closest one to the true coefficients. 
+
+1. Callaway & Sant'Anna (CS Unconditional and CS Conditional):
+Both the unconditional and conditional approaches of Callaway & Sant'Anna show significant pre-trends. This indicates that there are systematic differences in the outcomes before the treatment, which could invalidate the assumption of parallel trends required for a valid difference-in-differences analysis. Callaway & Sant'Anna's method allows for heterogeneous treatment effects and can detect pre-trends if they exist due to unobserved differences across cohorts.
+
+2. Sun & Abraham (SA):
+Sun & Abraham's methodology shows no significant pre-trends. Their method is designed to better handle heterogeneous treatment effects, which can affect the detection of pre-trends. Sun & Abraham explicitly model heterogeneity in treatment effects across different cohorts and time periods, which can lead to differences in the identification of pre-trends compared to methods that do not account for such heterogeneity. This can result in their method showing no significant pre-trends even when other methods do, due to their model's ability to account for the heterogeneity more effectively.
+
+Sun & Abraham's method accounts for the variations by allowing each cohort to have its own specific treatment effect trajectory, due to the time of the treatment received. This can mitigate the appearance of systematic differences before the treatment, leading to no significant pre-trends in their estimates. This flexibility is crucial for accurately estimating treatment effects in the presence of heterogeneity but can also lead to the detection of no pre-trends when in reality, there might be underlying differences.
+
+So even though we are not able to tell which method is the best one, we have seen that Sun and Abraham model claims no pre-trends in their estimates, while Callaway and Sant'Anna claims the opposite.
+
+To showcase the results in a graph and conclude our analysis:
+
+```{r comparisongraphs, warning= FALSE, message=FALSE}
+
+ggplot(comparison_df, aes(x = Period)) +
+  geom_line(aes(y = Estimate_CS_Unconditional, color = "Callaway & Sant'Anna Unconditional"), size = 1, linetype = "dashed") +
+  geom_line(aes(y = Estimate_CS_Conditional, color = "Callaway & Sant'Anna Conditional"), size = 1, linetype = "dotdash") +
+  geom_line(aes(y = Estimate_SA, color = "Sun & Abraham"), size = 1) +
+  labs(title = "Comparison of Estimated Treatment Effects",
+       x = "Period",
+       y = "Estimated Treatment Effect",
+       color = "Estimator") +
+  theme_minimal()
+```
